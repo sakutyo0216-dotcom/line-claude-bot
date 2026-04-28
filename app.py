@@ -1,16 +1,16 @@
 """
-統合 LINE Bot
+統合 LINE Bot + エージェント
 - ホール名を送る    → パチンコホール分析（熱い日・注力機種・台番末尾）
 - 「最新予想」      → 直近の競馬予想レポート一覧
 - 「〇〇ステークス」→ 該当レースの予想を返す
 - 「ホール一覧」    → 千葉県登録ホール一覧
-- その他           → Claude と通常会話
+- その他           → エージェント（Web検索・ファイル・記憶・スケジュール対応）
 """
 
 import os
-import sys
 import re
 import glob
+import threading
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -19,15 +19,20 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import anthropic
 
 from analyze_hall import run_analysis, get_data, list_hall_names, find_hall
+from memory_db import init_db, save_message
+from agent import run_agent
 
 KEIBA_DIR = os.path.join(os.path.dirname(__file__), "..", "keiba-predictor")
 
-app        = Flask(__name__)
+app          = Flask(__name__)
 line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
-handler    = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
-claude     = anthropic.Anthropic()
+handler      = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+claude       = anthropic.Anthropic()
 
-conversation_histories: dict = {}
+# DB初期化・スケジューラ起動
+init_db()
+from scheduler_setup import restore_all_schedules
+restore_all_schedules(line_bot_api)
 
 
 # ─────────────────────────────────────────
@@ -35,7 +40,6 @@ conversation_histories: dict = {}
 # ─────────────────────────────────────────
 
 def detect_hall_query(text: str) -> str | None:
-    """メッセージがホール分析リクエストか判定してホール名を返す"""
     cleaned = re.sub(
         r'(を?分析|を?教えて|を?調べて|はどう|について|の情報|どんなホール)',
         '', text
@@ -57,20 +61,15 @@ def is_hall_list_request(text: str) -> bool:
 # ─────────────────────────────────────────
 
 def get_prediction_files() -> list[str]:
-    """prediction_*.txt を更新日時降順で返す"""
     pattern = os.path.join(KEIBA_DIR, "prediction_*.txt")
-    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    return files
+    return sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
 
 def search_prediction(query: str) -> str | None:
-    """レース名でファイルを検索して内容を返す"""
     for path in get_prediction_files():
-        fname = os.path.basename(path)
-        if query in fname:
+        if query in os.path.basename(path):
             with open(path, encoding="utf-8") as f:
                 return f.read()
-    # ファイル名でなくても中身を検索
     for path in get_prediction_files():
         with open(path, encoding="utf-8", errors="ignore") as f:
             content = f.read()
@@ -80,7 +79,6 @@ def search_prediction(query: str) -> str | None:
 
 
 def get_latest_prediction_summary() -> str:
-    """最新予想ファイルの一覧を返す"""
     files = get_prediction_files()
     if not files:
         return "保存済みの競馬予想はありません。"
@@ -98,20 +96,16 @@ def is_keiba_request(text: str) -> bool:
 
 
 def format_prediction_for_line(full_text: str) -> str:
-    """長い予想テキストをLINE向けに要約する（Claude使用）"""
     response = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system="競馬予想レポートをLINE送信用に要約するアシスタントです。",
-        messages=[{
-            "role": "user",
-            "content": (
-                "以下の競馬予想レポートを600文字以内で要約してください。\n"
-                "必ず含める内容：レース名・本命/対抗/単穴・買い目（単勝/馬連/3連複）\n"
-                "絵文字なし・シンプルなテキストで。\n\n"
-                f"【レポート】\n{full_text[:3000]}"
-            )
-        }]
+        messages=[{"role": "user", "content": (
+            "以下の競馬予想レポートを600文字以内で要約してください。\n"
+            "必ず含める内容：レース名・本命/対抗/単穴・買い目（単勝/馬連/3連複）\n"
+            "絵文字なし・シンプルなテキストで。\n\n"
+            f"【レポート】\n{full_text[:3000]}"
+        )}]
     )
     return response.content[0].text
 
@@ -135,9 +129,27 @@ def webhook():
 def handle_message(event):
     user_id      = event.source.user_id
     user_message = event.message.text.strip()
+    reply_token  = event.reply_token
 
-    reply = _get_reply(user_message, user_id)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    # 長時間処理でも LINE の webhook タイムアウトに引っかからないようスレッドで処理
+    t = threading.Thread(
+        target=_process_and_reply,
+        args=(user_message, user_id, reply_token),
+        daemon=True,
+    )
+    t.start()
+
+
+def _process_and_reply(text: str, user_id: str, reply_token: str):
+    reply = _get_reply(text, user_id)
+    try:
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply))
+    except Exception:
+        # reply_token 期限切れの場合は push で送る
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text=reply))
+        except Exception as e:
+            print(f"[bot] 送信失敗: {e}")
 
 
 def _get_reply(text: str, user_id: str) -> str:
@@ -146,71 +158,63 @@ def _get_reply(text: str, user_id: str) -> str:
     if is_hall_list_request(text):
         stores, _, _ = get_data()
         names = list_hall_names(stores)
-        body = "\n".join(f"・{n}" for n in names[:30])
+        body   = "\n".join(f"・{n}" for n in names[:30])
         suffix = f"\n…他{len(names)-30}件" if len(names) > 30 else ""
-        return f"【千葉県 登録ホール一覧】\n{body}{suffix}"
+        reply  = f"【千葉県 登録ホール一覧】\n{body}{suffix}"
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
 
     # ── ホール分析 ──
     hall_name = detect_hall_query(text)
     if hall_name:
         try:
-            return run_analysis(hall_name, for_line=True)
+            reply = run_analysis(hall_name, for_line=True)
         except Exception as e:
-            return f"分析中にエラーが発生しました: {e}"
+            reply = f"分析中にエラーが発生しました: {e}"
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
 
     # ── 競馬: 最新予想一覧 ──
     if re.search(r'最新予想|予想一覧|レース一覧', text):
-        return get_latest_prediction_summary()
+        reply = get_latest_prediction_summary()
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
 
     # ── 競馬: レース名で検索 ──
     if is_keiba_request(text):
-        # レース名候補を抽出（ステークス/杯/賞/オークス等）
         race_match = re.search(
             r'([^\s　]{2,15}(?:ステークス|杯|賞|オークス|ダービー|カップ|記念|特別))',
             text
         )
         query = race_match.group(1) if race_match else None
-
         if query:
             content = search_prediction(query)
             if content:
-                return format_prediction_for_line(content)
-            return f"「{query}」の予想が見つかりませんでした。\n「最新予想」と送ると一覧を確認できます。"
+                reply = format_prediction_for_line(content)
+            else:
+                reply = f"「{query}」の予想が見つかりませんでした。\n「最新予想」と送ると一覧を確認できます。"
+        else:
+            files = get_prediction_files()
+            if files:
+                with open(files[0], encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                reply = format_prediction_for_line(content)
+            else:
+                reply = "保存済みの予想がありません。先にスクレイピング・予想生成を実行してください。"
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
 
-        # レース名が特定できない場合は最新ファイルを返す
-        files = get_prediction_files()
-        if files:
-            with open(files[0], encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            return format_prediction_for_line(content)
-        return "保存済みの予想がありません。先にスクレイピング・予想生成を実行してください。"
-
-    # ── 通常 Claude 会話 ──
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
-
-    conversation_histories[user_id].append({"role": "user", "content": text})
-    if len(conversation_histories[user_id]) > 20:
-        conversation_histories[user_id] = conversation_histories[user_id][-20:]
-
-    response = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=(
-            "あなたは競馬予想とパチンコホール分析のアシスタントです。\n"
-            "・ホール名を送ると：熱い日のパターン・注力機種・台番末尾の傾向を分析します\n"
-            "・「最新予想」と送ると：競馬予想レポート一覧を表示します\n"
-            "・レース名を送ると：そのレースの予想を表示します\n"
-            "日本語で返答してください。"
-        ),
-        messages=conversation_histories[user_id],
-    )
-
-    reply_text = response.content[0].text
-    conversation_histories[user_id].append({"role": "assistant", "content": reply_text})
-    return reply_text
+    # ── エージェントモード（Web検索・ファイル・記憶・スケジュール・通常会話すべて対応）──
+    try:
+        return run_agent(user_id, text)
+    except Exception as e:
+        return f"エラーが発生しました: {e}"
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)

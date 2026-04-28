@@ -3,3 +3,7 @@ line-bot-sdk
 anthropic
 gunicorn
 pandas
+apscheduler
+pyngrok
+requests
+python-dotenv
