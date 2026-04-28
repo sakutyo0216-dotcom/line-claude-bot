@@ -154,9 +154,18 @@ def analyze_models(models: list[dict]) -> list[dict]:
             "plus_rate": plus_rate,
             "total_machines": data["total"],
         })
+    def is_valid_name(name: str) -> bool:
+        """パース失敗で機種名欄にデータ塊が入った行を除外する"""
+        if not name.strip():
+            return False
+        # "ランク5 4/11(土) 機種単位..." のような崩れたデータを除外
+        if re.search(r'ランク\d|機種単位|\d+/\d+台|平均[+-]', name):
+            return False
+        return True
+
     return [
         m for m in sorted(result, key=lambda x: (-x["avg_rank"], -x["avg_diff"]))
-        if m["model_name"].strip()  # 機種名が空の行を除外
+        if is_valid_name(m["model_name"])
     ]
 
 
