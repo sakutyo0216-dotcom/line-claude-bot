@@ -170,11 +170,11 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
         f"  {pat}: 平均{avg}点 ({cnt}回)" for pat, avg, cnt in day_patterns
     ) or "  パターン検出なし"
 
-    # 機種上位10件
+    # 機種上位5件（Python側で確定済み・順位変更禁止）
     top_models_str = "\n".join(
-        f"  {m['model_name']} / 平均差枚{m['avg_diff']:+}枚 / プラス率{m['plus_rate']}% / "
+        f"  {i}位: {m['model_name']} / 平均差枚{m['avg_diff']:+}枚 / プラス率{m['plus_rate']}% / "
         f"平均ランク{m['avg_rank']} / {m['total_machines']}台"
-        for m in models[:10]
+        for i, m in enumerate(models[:5], 1)
     )
 
     # 台番末尾集計
@@ -210,7 +210,8 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
    日付（5/5など）から独自にパターンを推測することも禁止です。
 
 2. 【力を入れている機種】
-   出玉・プラス率・ランクから特に力を入れていると思われる機種を3〜5台ピックアップし、理由を説明してください。
+   上記「機種データ」の1位〜5位をそのままの順番で全て取り上げ、それぞれなぜ注目なのかを1〜2文で説明してください。
+   順位の変更・省略・追加は禁止です。
 
 3. 【台番末尾の傾向】
    末尾数字ごとのデータから有意差があるか判定し、狙い目の末尾があれば具体的に示してください。
