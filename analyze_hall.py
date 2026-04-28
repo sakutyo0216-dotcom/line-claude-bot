@@ -123,6 +123,20 @@ def analyze_last_digit(machines: list[dict]) -> dict:
     return result
 
 
+def analyze_conditions(machines: list[dict]) -> dict[str, list[str]]:
+    """優秀/良ラベル付き台番を機種ごとにまとめる"""
+    result: dict[str, list[str]] = {"優秀": [], "良": []}
+    for m in machines:
+        cond = m.get("condition", "")
+        if cond not in ("優秀", "良"):
+            continue
+        num   = m.get("machine_num", "")
+        model = m.get("model_name", "")
+        label = f"{num}番({model})" if model else f"{num}番"
+        result[cond].append(label)
+    return result
+
+
 def analyze_models(models: list[dict]) -> list[dict]:
     """機種を集計・ランク付け"""
     model_summary: dict = defaultdict(lambda: {"diffs": [], "ranks": [], "plus": 0, "total": 0})
@@ -170,12 +184,9 @@ def analyze_models(models: list[dict]) -> list[dict]:
 
 
 def build_prompt(hall_name: str, schedule: list, day_patterns: list,
-                 models: list, digit_stats: dict, for_line: bool = False) -> str:
-
-    # スケジュール全件（日付と点数とイベント）
-    schedule_str = "\n".join(
-        f"  {date}: {score}点  {events}" for date, score, events in schedule
-    )
+                 models: list, digit_stats: dict,
+                 conditions: dict | None = None,
+                 for_line: bool = False) -> str:
 
     # 日付パターン
     pattern_str = "\n".join(
@@ -200,8 +211,25 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
     ]
     digit_str = "\n".join(digit_lines) or "データなし"
 
+    # 優秀/良 台番リスト
+    cond_parts = []
+    if conditions:
+        if conditions.get("優秀"):
+            cond_parts.append("  優秀: " + "、".join(conditions["優秀"][:15]))
+        if conditions.get("良"):
+            cond_parts.append("  良:   " + "、".join(conditions["良"][:15]))
+    condition_str = "\n".join(cond_parts) if cond_parts else "  条件データなし（次回スクレイプ後に反映）"
+
+    cond_instruction = (
+        "\n4. 【優秀/良 台番】\n"
+        "   上記「優秀/良台番リスト」に台番が記載されている場合は、機種名と台番を示して\n"
+        "   「この台は狙い目」として具体的に案内してください。\n"
+        "   条件データなしの場合はその旨だけ書いてください。"
+        if cond_parts else ""
+    )
+
     line_note = (
-        "\n出力はLINE向けに絵文字なし・箇条書きで、全体800文字以内にまとめてください。"
+        "\n出力はLINE向けに絵文字なし・箇条書きで、全体900文字以内にまとめてください。"
         if for_line else ""
     )
 
@@ -215,6 +243,9 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
 
 【台番末尾数字ごとの出玉集計】
 {digit_str}
+
+【優秀/良 台番リスト（サイトの条件ラベルをそのまま反映）】
+{condition_str}
 
 上記データをもとに以下を分析してください：{line_note}
 
@@ -232,7 +263,7 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
 3. 【台番末尾の傾向】
    末尾数字ごとのデータから有意差があるか判定し、狙い目の末尾があれば具体的に示してください。
    差がない場合もその旨を明記してください。
-
+{cond_instruction}
 実際に行く際に役立つアドバイスとしてまとめてください。
 """
 
@@ -259,16 +290,18 @@ def run_analysis(hall_query: str, for_line: bool = False) -> str:
     day_patterns = extract_day_patterns(schedule)
     model_stats = analyze_models(hall_models)
     digit_stats = analyze_last_digit(hall_machines)
+    conditions  = analyze_conditions(hall_machines)
 
     if not schedule and not model_stats:
         return f"「{hall_name}」の詳細データがありません。"
 
-    prompt = build_prompt(hall_name, schedule, day_patterns, model_stats, digit_stats, for_line)
+    prompt = build_prompt(hall_name, schedule, day_patterns, model_stats, digit_stats,
+                          conditions, for_line)
 
     client = anthropic.Anthropic()
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1500 if not for_line else 800,
+        max_tokens=1500 if not for_line else 900,
         system=(
             "あなたはパチンコ・スロットのホール分析の専門家です。"
             "データをもとに客観的・実用的なアドバイスを提供してください。"
