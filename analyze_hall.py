@@ -183,11 +183,14 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
     ) or "  パターン検出なし"
 
     # 機種上位5件（Python側で確定済み・順位変更禁止）
-    top_models_str = "\n".join(
-        f"  {i}位: {m['model_name']} / 平均差枚{m['avg_diff']:+}枚 / プラス率{m['plus_rate']}% / "
-        f"平均ランク{m['avg_rank']} / {m['total_machines']}台"
-        for i, m in enumerate(models[:5], 1)
-    )
+    if models:
+        top_models_str = "\n".join(
+            f"  {i}位: {m['model_name']} / 平均差枚{m['avg_diff']:+}枚 / プラス率{m['plus_rate']}% / "
+            f"平均ランク{m['avg_rank']} / {m['total_machines']}台"
+            for i, m in enumerate(models[:5], 1)
+        )
+    else:
+        top_models_str = "  （機種名データを取得できませんでした）"
 
     # 台番末尾集計
     digit_lines = [
@@ -222,7 +225,8 @@ def build_prompt(hall_name: str, schedule: list, day_patterns: list,
    日付（5/5など）から独自にパターンを推測することも禁止です。
 
 2. 【力を入れている機種】
-   上記「機種データ」の1位〜5位をそのままの順番で全て取り上げ、それぞれなぜ注目なのかを1〜2文で説明してください。
+   機種データが「（機種名データを取得できませんでした）」の場合は「機種データ未取得」とだけ書いてください。
+   データがある場合は1位〜5位をそのままの順番で全て取り上げ、それぞれなぜ注目なのかを1〜2文で説明してください。
    順位の変更・省略・追加は禁止です。
 
 3. 【台番末尾の傾向】
