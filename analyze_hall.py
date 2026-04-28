@@ -59,6 +59,12 @@ def parse_schedule(schedule_week: str) -> list[tuple[str, float, str]]:
     return sorted(results, key=lambda x: x[1], reverse=True)
 
 
+PATTERN_ALIAS = {
+    "月と重なる日": "月と日がゾロ目の日（1/1・2/2・3/3…）",
+    "ゾロ目の日":   "月と日がゾロ目の日（1/1・2/2・3/3…）",
+}
+
+
 def extract_day_patterns(schedule: list[tuple]) -> list[tuple[str, float, int]]:
     """
     スケジュールから「〇のつく日」「ゾロ目」等の繰り返しパターンを抽出し、
@@ -66,22 +72,13 @@ def extract_day_patterns(schedule: list[tuple]) -> list[tuple[str, float, int]]:
     """
     pattern_scores: dict[str, list[float]] = defaultdict(list)
 
-    # パターン名の正規化マップ（サイト表記 → わかりやすい表記）
-    PATTERN_ALIAS = {
-        "月と重なる日": "月と日がゾロ目の日（1/1・2/2・3/3…）",
-        "ゾロ目の日":   "月と日がゾロ目の日（1/1・2/2・3/3…）",
-    }
-
     for date, score, events in schedule:
-        # 「Xのつく日」「ゾロ目の日」「月と重なる日」「周年」などを抽出
         found = re.findall(
             r'(\d+のつく日|ゾロ目の日|月と重なる日|[^\s(（]+周年|特定日|週末|土日)',
             events
         )
-        # 表記を正規化
         found = [PATTERN_ALIAS.get(p, p) for p in found]
         if not found:
-            # 明示的なパターンがなければ取材種別を使う
             if re.search(r'取材|来店', events):
                 found = ["取材あり"]
             elif re.search(r'新台入替', events):
@@ -94,6 +91,22 @@ def extract_day_patterns(schedule: list[tuple]) -> list[tuple[str, float, int]]:
         avg = round(sum(scores) / len(scores), 1)
         result.append((pat, avg, len(scores)))
     return sorted(result, key=lambda x: -x[1])
+
+
+def parse_past_patterns(past_patterns_str: str) -> list[tuple[str, int]]:
+    """
+    past_patterns フィールド（"7のつく日:4,ゾロ目の日:2,..."）を解析し、
+    [(正規化パターン名, 出現回数), ...] を回数降順で返す
+    """
+    if not past_patterns_str:
+        return []
+    merged: dict[str, int] = defaultdict(int)
+    for item in past_patterns_str.split(","):
+        m = re.match(r"(.+?):(\d+)", item.strip())
+        if m:
+            pat = PATTERN_ALIAS.get(m.group(1).strip(), m.group(1).strip())
+            merged[pat] += int(m.group(2))
+    return sorted(merged.items(), key=lambda x: -x[1])
 
 
 def analyze_last_digit(machines: list[dict]) -> dict:
@@ -186,12 +199,20 @@ def analyze_models(models: list[dict]) -> list[dict]:
 def build_prompt(hall_name: str, schedule: list, day_patterns: list,
                  models: list, digit_stats: dict,
                  conditions: dict | None = None,
+                 past_patterns: list | None = None,
                  for_line: bool = False) -> str:
 
-    # 日付パターン
-    pattern_str = "\n".join(
-        f"  {pat}: 平均{avg}点 ({cnt}回)" for pat, avg, cnt in day_patterns
-    ) or "  パターン検出なし"
+    # 旧イベ実績パターン（過去スケジュールから）
+    if past_patterns:
+        pattern_str = "\n".join(
+            f"  {pat}: {cnt}回（旧イベ実績）" for pat, cnt in past_patterns
+        )
+    elif day_patterns:
+        pattern_str = "\n".join(
+            f"  {pat}: 平均{avg}点 ({cnt}回)" for pat, avg, cnt in day_patterns
+        )
+    else:
+        pattern_str = "  パターン検出なし"
 
     # 機種上位5件（Python側で確定済み・順位変更禁止）
     if models:
@@ -286,17 +307,18 @@ def run_analysis(hall_query: str, for_line: bool = False) -> str:
     hall_models   = [m for m in models   if m["hall_id"] == hall_id]
     hall_machines = [m for m in machines if m["hall_id"] == hall_id]
 
-    schedule    = parse_schedule(store.get("schedule_week", ""))
+    schedule     = parse_schedule(store.get("schedule_week", ""))
     day_patterns = extract_day_patterns(schedule)
-    model_stats = analyze_models(hall_models)
-    digit_stats = analyze_last_digit(hall_machines)
-    conditions  = analyze_conditions(hall_machines)
+    past_pats    = parse_past_patterns(store.get("past_patterns", ""))
+    model_stats  = analyze_models(hall_models)
+    digit_stats  = analyze_last_digit(hall_machines)
+    conditions   = analyze_conditions(hall_machines)
 
-    if not schedule and not model_stats:
+    if not schedule and not model_stats and not past_pats:
         return f"「{hall_name}」の詳細データがありません。"
 
     prompt = build_prompt(hall_name, schedule, day_patterns, model_stats, digit_stats,
-                          conditions, for_line)
+                          conditions, past_pats, for_line)
 
     client = anthropic.Anthropic()
     response = client.messages.create(
