@@ -154,7 +154,10 @@ def analyze_models(models: list[dict]) -> list[dict]:
             "plus_rate": plus_rate,
             "total_machines": data["total"],
         })
-    return sorted(result, key=lambda x: (-x["avg_rank"], -x["avg_diff"]))
+    return [
+        m for m in sorted(result, key=lambda x: (-x["avg_rank"], -x["avg_diff"]))
+        if m["model_name"].strip()  # 機種名が空の行を除外
+    ]
 
 
 def build_prompt(hall_name: str, schedule: list, day_patterns: list,
