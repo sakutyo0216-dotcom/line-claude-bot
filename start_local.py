@@ -68,6 +68,8 @@ if __name__ == "__main__":
 
     print("[start] ngrok 起動中...")
     public_url = start_ngrok(PORT)
+    os.environ["PUBLIC_BASE_URL"] = public_url
+    print(f"[start] PUBLIC_BASE_URL を {public_url} に設定")
 
     print("[start] LINE Webhook 更新中...")
     try:
