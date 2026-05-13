@@ -154,6 +154,35 @@ def _process_and_reply(text: str, user_id: str, reply_token: str):
 
 def _get_reply(text: str, user_id: str) -> str:
 
+    # ── AIニュース自動配信 登録/停止 ──
+    if re.search(r'AIニュース.*(自動配信|登録|購読|開始|オン|on)', text, re.IGNORECASE):
+        from scheduler_setup import register_ai_news_schedule
+        times = register_ai_news_schedule(user_id)
+        reply = (
+            "AIニュースの自動配信を登録しました。\n"
+            f"毎日 {' / '.join(times)} に最新のAI関連ニュース5〜10件をお届けします。\n"
+            "停止するには「AIニュース停止」と送ってください。"
+        )
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
+
+    if re.search(r'AIニュース.*(停止|解除|オフ|off|キャンセル)', text, re.IGNORECASE):
+        from scheduler_setup import unregister_ai_news_schedule
+        n = unregister_ai_news_schedule(user_id)
+        reply = f"AIニュースの自動配信を解除しました（{n}件のスケジュールを削除）。"
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
+
+    # ── AIニュース 即時表示 ──
+    if re.search(r'^(AIニュース|aiニュース|AI ニュース|AI news)', text, re.IGNORECASE):
+        from ai_news import get_ai_news_message
+        reply = get_ai_news_message(count=8)
+        save_message(user_id, "user", text)
+        save_message(user_id, "assistant", reply)
+        return reply
+
     # ── ホール一覧 ──
     if is_hall_list_request(text):
         stores, _, _ = get_data()

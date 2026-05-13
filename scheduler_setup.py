@@ -56,6 +56,64 @@ def _run_job(user_id: str, task_id: str, prompt: str):
         print(f"[scheduler] エラー({task_id}): {e}")
 
 
+def _run_ai_news_job(user_id: str, task_id: str):
+    from ai_news import get_ai_news_message
+    from linebot.models import TextSendMessage
+    try:
+        print(f"[scheduler] AIニュース実行: {task_id}")
+        msg = get_ai_news_message(count=8)
+        _line_api.push_message(user_id, TextSendMessage(text=msg))
+    except Exception as e:
+        print(f"[scheduler] AIニュースエラー({task_id}): {e}")
+
+
+AI_NEWS_TIMES = [(4, 0), (18, 0)]  # 毎日4:00と18:00
+
+
+def ai_news_task_ids(user_id: str) -> list[str]:
+    return [f"ai_news_{user_id}_{h:02d}{m:02d}" for h, m in AI_NEWS_TIMES]
+
+
+def register_ai_news_schedule(user_id: str) -> list[str]:
+    """毎日4:00と18:00にAIニュースを自動プッシュする定期タスクを登録"""
+    from memory_db import save_schedule
+    registered = []
+    for h, m in AI_NEWS_TIMES:
+        task_id = f"ai_news_{user_id}_{h:02d}{m:02d}"
+        cron_expr = f"{m} {h} * * *"
+        trigger = CronTrigger(
+            minute=m, hour=h, day="*", month="*", day_of_week="*",
+            timezone="Asia/Tokyo",
+        )
+        scheduler.add_job(
+            _run_ai_news_job, trigger=trigger,
+            id=task_id, replace_existing=True,
+            args=[user_id, task_id],
+        )
+        save_schedule(
+            user_id, task_id, cron_expr,
+            f"AIニュース配信 {h:02d}:{m:02d}",
+            "__AI_NEWS__",  # 識別用マーカー（_run_jobではなく_run_ai_news_jobで処理）
+        )
+        registered.append(f"{h:02d}:{m:02d}")
+        print(f"[scheduler] AIニュース登録: {task_id} ({cron_expr})")
+    return registered
+
+
+def unregister_ai_news_schedule(user_id: str) -> int:
+    """ユーザーのAIニュース定期タスクを全て解除"""
+    from memory_db import delete_schedule_db
+    count = 0
+    for task_id in ai_news_task_ids(user_id):
+        try:
+            scheduler.remove_job(task_id)
+        except Exception:
+            pass
+        delete_schedule_db(task_id)
+        count += 1
+    return count
+
+
 def register_schedule(user_id: str, task_id: str, cron_expr: str, prompt: str):
     parts = cron_expr.split()
     if len(parts) != 5:
@@ -88,4 +146,20 @@ def restore_all_schedules(line_bot_api):
     from memory_db import load_schedules
     init_scheduler(line_bot_api)
     for s in load_schedules():
-        register_schedule(s["user_id"], s["task_id"], s["cron_expr"], s["prompt"])
+        if s["prompt"] == "__AI_NEWS__":
+            parts = s["cron_expr"].split()
+            if len(parts) == 5:
+                minute, hour, day, month, dow = parts
+                trigger = CronTrigger(
+                    minute=minute, hour=hour, day=day,
+                    month=month, day_of_week=dow,
+                    timezone="Asia/Tokyo",
+                )
+                scheduler.add_job(
+                    _run_ai_news_job, trigger=trigger,
+                    id=s["task_id"], replace_existing=True,
+                    args=[s["user_id"], s["task_id"]],
+                )
+                print(f"[scheduler] AIニュース復元: {s['task_id']} ({s['cron_expr']})")
+        else:
+            register_schedule(s["user_id"], s["task_id"], s["cron_expr"], s["prompt"])
