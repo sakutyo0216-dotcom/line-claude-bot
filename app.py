@@ -12,7 +12,7 @@ import re
 import glob
 import threading
 from datetime import datetime
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -114,6 +114,72 @@ def format_prediction_for_line(full_text: str) -> str:
 # Webhook
 # ─────────────────────────────────────────
 
+AI_NEWS_HTML = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIニュース</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif;
+         max-width: 760px; margin: 0 auto; padding: 16px; line-height: 1.6; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;
+           border-bottom: 1px solid #ccc; padding-bottom: 8px; margin-bottom: 16px; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  .updated { font-size: 0.85rem; color: #666; }
+  .actions a { font-size: 0.9rem; margin-left: 8px; }
+  article { padding: 12px 0; border-bottom: 1px solid #eee; }
+  article h2 { font-size: 1.05rem; margin: 0 0 6px; }
+  article h2 a { text-decoration: none; }
+  article h2 a:hover { text-decoration: underline; }
+  .snippet { color: #444; font-size: 0.95rem; margin: 4px 0; }
+  .url { font-size: 0.8rem; color: #888; word-break: break-all; }
+  .num { color: #888; margin-right: 6px; }
+  .empty { color: #888; padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AIニュース</h1>
+  <div>
+    <span class="updated">更新: {{ updated_at or "未取得" }}</span>
+    <span class="actions"><a href="/ai-news?refresh=1">いますぐ更新</a></span>
+  </div>
+</header>
+{% if items %}
+  {% for r in items %}
+    <article>
+      <h2><span class="num">{{ loop.index }}.</span><a href="{{ r.url }}" target="_blank" rel="noopener noreferrer">{{ r.title or "(無題)" }}</a></h2>
+      {% if r.content %}<div class="snippet">{{ r.content[:240] }}{% if r.content|length > 240 %}…{% endif %}</div>{% endif %}
+      <div class="url">{{ r.url }}</div>
+    </article>
+  {% endfor %}
+{% else %}
+  <div class="empty">ニュースがまだありません。「いますぐ更新」を押してください。</div>
+{% endif %}
+</body>
+</html>"""
+
+
+@app.route("/ai-news")
+def ai_news_page():
+    from ai_news import get_or_refresh_cache, update_news_cache
+    if request.args.get("refresh") == "1":
+        cache = update_news_cache(count=8)
+    else:
+        cache = get_or_refresh_cache(count=8)
+    updated = cache.get("updated_at", "")
+    if updated:
+        try:
+            updated = datetime.fromisoformat(updated).strftime("%Y/%m/%d %H:%M")
+        except Exception:
+            pass
+    return render_template_string(
+        AI_NEWS_HTML, items=cache.get("items", []), updated_at=updated
+    )
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers.get("X-Line-Signature", "")
@@ -158,10 +224,13 @@ def _get_reply(text: str, user_id: str) -> str:
     if re.search(r'AIニュース.*(自動配信|登録|購読|開始|オン|on)', text, re.IGNORECASE):
         from scheduler_setup import register_ai_news_schedule
         times = register_ai_news_schedule(user_id)
+        base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        url_line = f"\n閲覧URL: {base}/ai-news" if base else ""
         reply = (
-            "AIニュースの自動配信を登録しました。\n"
-            f"毎日 {' / '.join(times)} に最新のAI関連ニュース5〜10件をお届けします。\n"
-            "停止するには「AIニュース停止」と送ってください。"
+            "AIニュース自動配信を登録しました。\n"
+            f"毎日 {' / '.join(times)} に更新通知を送ります。"
+            f"{url_line}\n"
+            "停止: 「AIニュース停止」"
         )
         save_message(user_id, "user", text)
         save_message(user_id, "assistant", reply)
@@ -170,15 +239,21 @@ def _get_reply(text: str, user_id: str) -> str:
     if re.search(r'AIニュース.*(停止|解除|オフ|off|キャンセル)', text, re.IGNORECASE):
         from scheduler_setup import unregister_ai_news_schedule
         n = unregister_ai_news_schedule(user_id)
-        reply = f"AIニュースの自動配信を解除しました（{n}件のスケジュールを削除）。"
+        reply = f"AIニュース自動配信を解除しました（{n}件削除）。"
         save_message(user_id, "user", text)
         save_message(user_id, "assistant", reply)
         return reply
 
-    # ── AIニュース 即時表示 ──
+    # ── AIニュース 即時更新＋URL通知 ──
     if re.search(r'^(AIニュース|aiニュース|AI ニュース|AI news)', text, re.IGNORECASE):
-        from ai_news import get_ai_news_message
-        reply = get_ai_news_message(count=8)
+        from ai_news import update_news_cache, format_short_notification
+        try:
+            update_news_cache(count=8)
+        except Exception as e:
+            reply = f"AIニュース取得エラー: {e}"
+        else:
+            base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+            reply = format_short_notification(f"{base}/ai-news" if base else "")
         save_message(user_id, "user", text)
         save_message(user_id, "assistant", reply)
         return reply

@@ -57,11 +57,15 @@ def _run_job(user_id: str, task_id: str, prompt: str):
 
 
 def _run_ai_news_job(user_id: str, task_id: str):
-    from ai_news import get_ai_news_message
+    import os
+    from ai_news import update_news_cache, format_short_notification
     from linebot.models import TextSendMessage
     try:
         print(f"[scheduler] AIニュース実行: {task_id}")
-        msg = get_ai_news_message(count=8)
+        update_news_cache(count=8)
+        base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        url = f"{base}/ai-news" if base else ""
+        msg = format_short_notification(url)
         _line_api.push_message(user_id, TextSendMessage(text=msg))
     except Exception as e:
         print(f"[scheduler] AIニュースエラー({task_id}): {e}")
