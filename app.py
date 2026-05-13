@@ -10,22 +10,16 @@
 import os
 import re
 import glob
-import hmac
 import threading
 from datetime import datetime
-from flask import (
-    Flask, request, abort, jsonify, render_template, redirect,
-    make_response, url_for,
-)
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import anthropic
 
 from analyze_hall import run_analysis, get_data, list_hall_names, find_hall
-from memory_db import (
-    init_db, save_message, list_users, load_messages_with_time,
-)
+from memory_db import init_db, save_message
 from agent import run_agent
 
 KEIBA_DIR = os.path.join(os.path.dirname(__file__), "..", "keiba-predictor")
@@ -219,98 +213,6 @@ def _get_reply(text: str, user_id: str) -> str:
         return run_agent(user_id, text)
     except Exception as e:
         return f"エラーが発生しました: {e}"
-
-
-# ─────────────────────────────────────────
-# 管理画面（リモート操作用）
-#   - チャット履歴閲覧
-#   - LINE push でメッセージ送信
-#   - 認証: 環境変数 ADMIN_TOKEN（Cookieまたは ?token=... または Bearer ヘッダ）
-# ─────────────────────────────────────────
-
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
-ADMIN_COOKIE = "admin_token"
-
-
-def _admin_authed() -> bool:
-    if not ADMIN_TOKEN:
-        return False
-    candidates = [
-        request.cookies.get(ADMIN_COOKIE, ""),
-        request.args.get("token", ""),
-    ]
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        candidates.append(auth[7:])
-    return any(hmac.compare_digest(c, ADMIN_TOKEN) for c in candidates if c)
-
-
-def _require_admin():
-    if not ADMIN_TOKEN:
-        abort(503, "ADMIN_TOKEN が未設定です")
-    if not _admin_authed():
-        abort(401)
-
-
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
-    if request.method == "POST":
-        token = request.form.get("token", "")
-        if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
-            resp = make_response(redirect(url_for("admin_index")))
-            resp.set_cookie(
-                ADMIN_COOKIE, token,
-                httponly=True, samesite="Lax", max_age=60 * 60 * 24 * 7,
-            )
-            return resp
-        return render_template("admin_login.html", error="トークンが違います"), 401
-    return render_template("admin_login.html", error=None)
-
-
-@app.route("/admin/logout", methods=["POST"])
-def admin_logout():
-    resp = make_response(redirect(url_for("admin_login")))
-    resp.delete_cookie(ADMIN_COOKIE)
-    return resp
-
-
-@app.route("/admin")
-def admin_index():
-    if not _admin_authed():
-        return redirect(url_for("admin_login"))
-    return render_template("admin.html")
-
-
-@app.route("/admin/api/users")
-def admin_api_users():
-    _require_admin()
-    return jsonify(list_users())
-
-
-@app.route("/admin/api/history")
-def admin_api_history():
-    _require_admin()
-    user_id = request.args.get("user_id", "").strip()
-    if not user_id:
-        abort(400, "user_id required")
-    limit = int(request.args.get("limit", 200))
-    return jsonify(load_messages_with_time(user_id, limit=limit))
-
-
-@app.route("/admin/api/send", methods=["POST"])
-def admin_api_send():
-    _require_admin()
-    data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "").strip()
-    text    = (data.get("text") or "").strip()
-    if not user_id or not text:
-        return jsonify({"ok": False, "error": "user_id と text は必須"}), 400
-    try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=text))
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    save_message(user_id, "assistant", text)
-    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
